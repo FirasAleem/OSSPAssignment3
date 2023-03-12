@@ -1,7 +1,8 @@
 # OS & SP Assignment 3
 This is the code for a C assignment for the OS & Systems Programming module during my second year at the University of Birmingham. It involves implementing a Linux kernel device driver. There was a small issue with the concurrency of my solution, where functions that copy between the user and kernel (such as ```strncpy_from_user```) were inside a mutex locked section.
 
-Here is the assignment brief in full:
+**Here is the assignment brief in full:**
+
 Write a device driver for a character device which implements a simple way of message passing. The kernel maintains a list of messages. To limit memory usage, we impose a limit of 4KB = 4*1024 bytes for each message and also impose a limit of the  total number of messages stored in the kernel, which is 1000.
 
 Your device driver should perform the following operations:
