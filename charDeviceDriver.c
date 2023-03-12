@@ -1,155 +1,193 @@
-/*
- *  chardev.c: Creates a read-only char device that says how many times
- *  you've read from the dev file
- */
-
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/fs.h>
-#include <asm/uaccess.h>	/* for put_user */
-#include <charDeviceDriver.h>
-#include "ioctl.h"
+#include <linux/spinlock.h>
+#include <linux/slab.h>
+#include <linux/sched.h>
+#include <asm/uaccess.h>
+#include "charDeviceDriver.h"
 
 MODULE_LICENSE("GPL");
+//Changed from the dev_lock since that isn’t used
+DEFINE_MUTEX(rw_lock);
 
-/* 
- * This function is called whenever a process tries to do an ioctl on our
- * device file. We get two extra parameters (additional to the inode and file
- * structures, which all device functions get): the number of the ioctl called
- * and the parameter given to the ioctl function.
- *
- * If the ioctl is write or read/write (meaning output is returned to the
- * calling process), the ioctl call returns the output of this function.
- *
- */
-
-
-DEFINE_MUTEX  (devLock);
-static int counter = 0;
-
-static long device_ioctl(struct file *file,	/* see include/linux/fs.h */
-		 unsigned int ioctl_num,	/* number and param for ioctl */
-		 unsigned long ioctl_param)
+/*Linked List Functions, went with own implementations*/
+int linkedListAdd(struct linkedListStruct *lst, char *charBuffer, size_t lengthOfMessage)
 {
+	struct node *currentNodeSt = lst->head;
+	if (!currentNodeSt) { //If not null
+        lst->head = kmalloc(sizeof(struct node), GFP_KERNEL); //k malloc a node
+        if (!lst->head){
+            return 0;
+        }
 
-	/*
-	 * Switch according to the ioctl called
-	 */
-	if (ioctl_num == RESET_COUNTER) {
-	    counter = 0;
-	    /* 	    return 0; */
-	    return 5; /* can pass integer as return value */
+		lst->head->message = kmalloc(sizeof(char) * lengthOfMessage, GFP_KERNEL);
+		strcpy(lst->head->message, charBuffer); //Add message
+		lst->head->next = NULL; //Next pointer is NULL
+	} else {
+		while (currentNodeSt->next) {
+            currentNodeSt = currentNodeSt->next;
+        }
+		currentNodeSt->next = kmalloc(sizeof(struct node), GFP_KERNEL);
+		if (!currentNodeSt->next) {
+            return 0;
+        }
+		currentNodeSt->next->message = kmalloc(sizeof(char) * lengthOfMessage, GFP_KERNEL);
+		strcpy(currentNodeSt->next->message, charBuffer);
+		currentNodeSt->next->next = NULL;
 	}
 
-	else {
-	    /* no operation defined - return failure */
-	    return -EINVAL;
+	// Update total number of messages (i.e. add one)
+	lst->numberOfMessages += 1;
 
+	return 1;
+}
+
+int linkedListRemove(struct linkedListStruct *lst, char **charBuffer)
+{
+	struct node *nextNodeForRemoval = NULL;
+    int lengthOfMessage;
+    size_t messageSize;
+
+	if (lst->head == NULL){
+		return 0;
+    }
+
+	nextNodeForRemoval = lst->head->next;
+
+    lengthOfMessage = strlen(lst->head->message) + 1;
+    messageSize = lengthOfMessage * sizeof(char); //used for k malloc
+
+	*charBuffer = kmalloc(messageSize, GFP_KERNEL);
+	strcpy(*charBuffer, lst->head->message);
+
+    // Update total number of messages (i.e. subtract one)
+	lst->numberOfMessages -= 1;
+    //Free to prevent memory leaks
+	kfree(lst->head->message);
+	kfree(lst->head);
+	lst->head = nextNodeForRemoval;
+
+	return 1;
+}
+
+int linkedListDelete(struct linkedListStruct *lst)
+{
+	struct node *currentNodeSt = lst->head;
+	struct node *tempNode;
+
+	while (currentNodeSt != NULL) {
+		tempNode = currentNodeSt;
+		currentNodeSt = currentNodeSt->next;
+		kfree(tempNode);
 	}
+    //Reset head and number of messages
+	lst->head = NULL;
+	lst->numberOfMessages = 0;
+
+	return 1;
 }
 
 
-/*
- * This function is called when the module is loaded
- */
 int init_module(void)
 {
-        Major = register_chrdev(0, DEVICE_NAME, &fops);
+    Major = register_chrdev(0, DEVICE_NAME, &fops);
 
-	if (Major < 0) {
-	  printk(KERN_ALERT "Registering char device failed with %d\n", Major);
-	  return Major;
-	}
-
-	printk(KERN_INFO "I was assigned major number %d. To talk to\n", Major);
-	printk(KERN_INFO "the driver, create a dev file with\n");
-	printk(KERN_INFO "'mknod /dev/%s c %d 0'.\n", DEVICE_NAME, Major);
-	printk(KERN_INFO "Try various minor numbers. Try to cat and echo to\n");
-	printk(KERN_INFO "the device file.\n");
-	printk(KERN_INFO "Remove the device file and module when done.\n");
+    if (Major < 0) {
+        printk(KERN_ALERT "Registering char device failed with %d\n", Major);
+        return Major;
+    }
+    //Start off the list with NULL and 0 messages
+	messageList.head = NULL;
+	messageList.numberOfMessages = 0;
+    //DO NOT CHANGE OR THE TESTS WILL FAIL!!!!
+    printk(KERN_INFO "I was assigned major number %d. To talk to\n", Major);
+    printk(KERN_INFO "the driver, create a dev file with\n");
+    printk(KERN_INFO "'mknod /dev/%s c %d 0'.\n", DEVICE_NAME, Major);
+    printk(KERN_INFO "Try various minor numbers. Try to cat and echo to\n");
+    printk(KERN_INFO "the device file.\n");
+    printk(KERN_INFO "Remove the device file and module when done.\n");
 
 	return SUCCESS;
 }
 
-/*
- * This function is called when the module is unloaded
- */
-void cleanup_module(void)
-{
-	/*  Unregister the device */
+void cleanup_module(void){
+    //Called when we exit
+	//Unregister the device as in the original code
 	unregister_chrdev(Major, DEVICE_NAME);
+    //Delete the link list to (hopefully) prevent any memory leaks
+    linkedListDelete(&messageList);
 }
 
-/*
- * Methods
- */
-
-/* 
- * Called when a process tries to open the device file, like
- * "cat /dev/mycharfile"
- */
-static int device_open(struct inode *inode, struct file *file)
-{
-
-    mutex_lock (&devLock);
-    if (Device_Open) {
-	mutex_unlock (&devLock);
-	return -EBUSY;
-    }
-    Device_Open++;
-    mutex_unlock (&devLock);
-    sprintf(msg, "I already told you %d times Hello world!\n", counter++);
-    try_module_get(THIS_MODULE);
-
-    return SUCCESS;
+static int device_open(struct inode *inode, struct file *file){
+	try_module_get(THIS_MODULE);
+	return SUCCESS;
 }
 
-/* Called when a process closes the device file. */
-static int device_release(struct inode *inode, struct file *file)
-{
-    mutex_lock (&devLock);
-	Device_Open--;		/* We're now ready for our next caller */
-	mutex_unlock (&devLock);
-	/*
-	 * Decrement the usage count, or else once you opened the file, you'll
-	 * never get get rid of the module.
-	 */
+static int device_release(struct inode *inode, struct file *file){
 	module_put(THIS_MODULE);
-
-	return 0;
+	return SUCCESS;
 }
 
-/* 
- * Called when a process, which already opened the dev file, attempts to
- * read from it.
- */
-static ssize_t device_read(struct file *filp,	/* see include/linux/fs.h   */
-			   char *buffer,	/* buffer to fill with data */
-			   size_t length,	/* length of the buffer     */
-			   loff_t * offset)
-{
-	/* result of function calls */
-	int result;
+static ssize_t device_read(struct file *filp, char __user *buffer, size_t length, loff_t *offset){
+    char *ptr;
+	int bytes_read = 0;
+	mutex_lock(&rw_lock);
+	if (!linkedListRemove(&messageList, &messagePointer)) {
+		mutex_unlock(&rw_lock);
+		return -EAGAIN; //If the list of messages is empty, we return -EAGAIN
+	}
 
+	if (*messagePointer == 0) {
+		mutex_unlock(&rw_lock);
+		return 0;
+	}
 
-	/*
-	 * Actually put the data into the buffer
-	 */
-	if (strlen(msg) + 1 < length)
-	    length = strlen(msg) + 1;
-	result = copy_to_user(buffer, msg, length);
-	if (result > 0)
-	    return -EFAULT; /* copy failed */
-	/*
-	 * Most read functions return the number of bytes put into the buffer
-	 */
+	ptr = messagePointer;
+
+	while (length && *ptr) {
+		put_user(*(ptr++), buffer++);
+
+		length--;
+		bytes_read++;
+	}
+
+	if (*ptr == '\0'){
+		put_user(*ptr, buffer);
+    }
+
+	kfree(messagePointer);
+	messagePointer = NULL;
+	mutex_unlock(&rw_lock);
+
+	return bytes_read;
+}
+//Please God, let this work
+static ssize_t device_write(struct file *filp, const char __user *buffer, size_t length, loff_t *offset){
+	int lengthPlusOne = length + 1;
+    char *charBuffer;
+	size_t messageSize = length * sizeof(char);
+
+	if (messageSize > maxMessageLength) {
+		printk(KERN_ALERT "Error message too big");
+		return -EINVAL; //If message is too big, return -EINVAL
+	}
+
+	if (messageList.numberOfMessages + 1 > maxNumberOfMessages) {
+		printk(KERN_ALERT "Error limit of the number of all messages was surpassed");
+		return -EBUSY; //If limit of messages is surpassed, return -EBUSY
+	}
+
+	//Get the message from user space
+	mutex_lock(&rw_lock);
+	charBuffer = kmalloc(sizeof(char) * lengthPlusOne, GFP_KERNEL);
+	strncpy_from_user(charBuffer, buffer, lengthPlusOne - 1);
+
+	if (!linkedListAdd(&messageList, charBuffer, lengthPlusOne)){
+		printk(KERN_ALERT "An error occurred when adding the message");
+    }
+	kfree(charBuffer);
+	mutex_unlock(&rw_lock);
+
 	return length;
-}
-
-/* Called when a process writes to dev file: echo "hi" > /dev/hello  */
-static ssize_t
-device_write(struct file *filp, const char *buff, size_t len, loff_t * off)
-{
-	printk(KERN_ALERT "Sorry, this operation isn't supported.\n");
-	return -EINVAL;
 }
